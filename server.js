@@ -12,61 +12,60 @@ app.use(cookieParser());
 
 const PORT = Number(process.env.PORT || 3000);
 
-// ---- Required OAuth env ----
+// ===== OAuth (User) =====
 const CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI;
 
-// ---- YouTube / UI env ----
-const TARGET_CHANNEL_ID =
-  process.env.TARGET_CHANNEL_ID || "UCLH3kQlui92HWRSJbrRZ9-A";
+// ===== YouTube =====
+const TARGET_CHANNEL_ID = process.env.TARGET_CHANNEL_ID;
 const CHANNEL_URL =
   process.env.CHANNEL_URL ||
-  `https://www.youtube.com/channel/${TARGET_CHANNEL_ID}`;
+  (TARGET_CHANNEL_ID ? `https://www.youtube.com/channel/${TARGET_CHANNEL_ID}` : "");
 
-// ---- Security / session ----
+// ===== Security =====
 const SESSION_SECRET = process.env.SESSION_SECRET;
 
-// ---- Timing ----
-const GRANT_SECONDS = Number(process.env.GRANT_SECONDS || 900); // 15 minutes
-const OAUTH_STATE_SECONDS = 600; // 10 minutes
+// ===== Timing =====
+const GRANT_SECONDS = Number(process.env.GRANT_SECONDS || 900); // 15 min
+const OAUTH_STATE_SECONDS = 600; // 10 min
 
-// ---- New multi-post config ----
-// 1) DOWNLOAD_MAP_JSON (recommended): {"psd_001":"https://...","psd_002":"https://..."}
-// 2) Backward compatibility: DOWNLOAD_URL (single) becomes key "default"
-const DOWNLOAD_MAP_JSON = process.env.DOWNLOAD_MAP_JSON;
-const DOWNLOAD_URL = process.env.DOWNLOAD_URL; // optional fallback
+// ===== Google Sheets (Download DB) =====
+const SHEET_ID = process.env.GOOGLE_SHEETS_ID;
+const SHEET_RANGE = process.env.GOOGLE_SHEETS_RANGE || "Downloads!A:D";
+const SA_EMAIL = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+let SA_PRIVATE_KEY = process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY;
 
-// Return URL safety
-// Comma-separated hostnames allowed in the return URL, e.g. "anandanrb.blogspot.com,anandanrb.com"
+// Allowed return hosts: "anandanrb.blogspot.com" (comma-separated if more)
 const ALLOWED_RETURN_HOSTS = (process.env.ALLOWED_RETURN_HOSTS || "")
   .split(",")
-  .map((s) => s.trim())
+  .map((s) => s.trim().toLowerCase())
   .filter(Boolean);
 
-// Optional fallback if "return" param not provided
-const DEFAULT_RETURN_URL = process.env.BLOGGER_RETURN_URL || "";
+// Cache sheet reads (avoid calling Sheets API for every visitor)
+const SHEET_CACHE_SECONDS = Number(process.env.SHEET_CACHE_SECONDS || 300); // 5 minutes
 
 if (!CLIENT_ID || !CLIENT_SECRET || !REDIRECT_URI || !SESSION_SECRET) {
-  console.error("Missing required env: GOOGLE_CLIENT_ID/SECRET/REDIRECT_URI/SESSION_SECRET");
+  console.error("Missing env: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI, SESSION_SECRET");
+  process.exit(1);
+}
+if (!TARGET_CHANNEL_ID) {
+  console.error("Missing env: TARGET_CHANNEL_ID");
+  process.exit(1);
+}
+if (!SHEET_ID || !SA_EMAIL || !SA_PRIVATE_KEY) {
+  console.error("Missing env for Sheets: GOOGLE_SHEETS_ID, GOOGLE_SERVICE_ACCOUNT_EMAIL, GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY");
+  process.exit(1);
+}
+if (ALLOWED_RETURN_HOSTS.length === 0) {
+  console.error("Missing env: ALLOWED_RETURN_HOSTS (example: anandanrb.blogspot.com)");
   process.exit(1);
 }
 
-// Parse download map
-let DOWNLOAD_MAP = {};
-try {
-  if (DOWNLOAD_MAP_JSON) {
-    DOWNLOAD_MAP = JSON.parse(DOWNLOAD_MAP_JSON);
-  } else if (DOWNLOAD_URL) {
-    DOWNLOAD_MAP = { default: DOWNLOAD_URL };
-  } else {
-    throw new Error("Set DOWNLOAD_MAP_JSON (recommended) or DOWNLOAD_URL (fallback).");
-  }
-} catch (e) {
-  console.error("Invalid DOWNLOAD_MAP_JSON:", e.message);
-  process.exit(1);
-}
+// Render usually stores private key with \n; convert to real newlines
+SA_PRIVATE_KEY = SA_PRIVATE_KEY.replace(/\\n/g, "\n");
 
+// ================= Helpers =================
 function oauthClient() {
   return new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
 }
@@ -97,18 +96,12 @@ function verifyPayload(token) {
   } catch {
     return null;
   }
-
   if (!payload.exp || Date.now() > payload.exp) return null;
   return payload;
 }
 
 function setGrantCookie(res) {
-  const payload = {
-    ok: true,
-    iat: Date.now(),
-    exp: Date.now() + GRANT_SECONDS * 1000,
-  };
-
+  const payload = { ok: true, iat: Date.now(), exp: Date.now() + GRANT_SECONDS * 1000 };
   const token = signPayload(payload);
 
   res.cookie("arb_subscriber_grant", token, {
@@ -129,7 +122,7 @@ function clearGrantCookie(res) {
   });
 }
 
-// ---- Return URL validation (prevents open-redirect abuse) ----
+// ===== Return URL allowlist (prevents open-redirect abuse) =====
 function isAllowedReturnUrl(urlString) {
   if (!urlString) return false;
 
@@ -141,17 +134,10 @@ function isAllowedReturnUrl(urlString) {
   }
 
   if (u.protocol !== "https:") return false;
-
-  // If no allowlist provided, fall back to DEFAULT_RETURN_URL host (if set)
-  const allowHosts =
-    ALLOWED_RETURN_HOSTS.length > 0
-      ? ALLOWED_RETURN_HOSTS
-      : (DEFAULT_RETURN_URL ? [new URL(DEFAULT_RETURN_URL).hostname] : []);
-
-  if (allowHosts.length === 0) return false;
-
   const host = u.hostname.toLowerCase();
-  return allowHosts.some((h) => host === h.toLowerCase());
+
+  // allow exact host OR subdomain of allowed host
+  return ALLOWED_RETURN_HOSTS.some((allowed) => host === allowed || host.endsWith("." + allowed));
 }
 
 function buildReturnRedirect(returnUrl, key) {
@@ -161,7 +147,7 @@ function buildReturnRedirect(returnUrl, key) {
   return u.toString();
 }
 
-// ---- YouTube API check (must pass oauth2 client, not string token) ----
+// ===== YouTube subscription check =====
 async function isSubscribed(oauth2Client) {
   const youtube = google.youtube({ version: "v3", auth: oauth2Client });
 
@@ -175,6 +161,7 @@ async function isSubscribed(oauth2Client) {
   return Array.isArray(response.data.items) && response.data.items.length > 0;
 }
 
+// ===== OAuth state token stores {key, returnUrl} securely =====
 function oauthStateToken({ key, returnUrl }) {
   return signPayload({
     purpose: "youtube_oauth",
@@ -191,6 +178,65 @@ function validOAuthState(state) {
   return payload;
 }
 
+// ================= Google Sheets download lookup =================
+let sheetCache = {
+  loadedAt: 0,
+  map: {}, // key -> { url, enabled, title }
+};
+
+async function loadDownloadMapFromSheet() {
+  const now = Date.now();
+  if (sheetCache.loadedAt && now - sheetCache.loadedAt < SHEET_CACHE_SECONDS * 1000) {
+    return sheetCache.map;
+  }
+
+  const jwt = new google.auth.JWT({
+    email: SA_EMAIL,
+    key: SA_PRIVATE_KEY,
+    scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
+  });
+
+  const sheets = google.sheets({ version: "v4", auth: jwt });
+
+  // Expected columns: A=key, B=title, C=download_url, D=enabled
+  const resp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: SHEET_RANGE,
+  });
+
+  const rows = resp.data.values || [];
+  const map = {};
+
+  // If first row is headers, this will still work; it just creates a useless "key" entry unless you keep headers
+  // Better: keep header row and skip it if it matches "key"
+  for (let i = 0; i < rows.length; i++) {
+    const [keyRaw, titleRaw, urlRaw, enabledRaw] = rows[i];
+
+    const key = String(keyRaw || "").trim();
+    const title = String(titleRaw || "").trim();
+    const url = String(urlRaw || "").trim();
+    const enabledStr = String(enabledRaw || "").trim().toLowerCase();
+
+    if (!key || key.toLowerCase() === "key") continue;
+    if (!url) continue;
+
+    const enabled = enabledStr === "true" || enabledStr === "1" || enabledStr === "yes";
+    map[key] = { url, enabled, title };
+  }
+
+  sheetCache = { loadedAt: now, map };
+  return map;
+}
+
+async function getDownloadUrlByKey(key) {
+  const map = await loadDownloadMapFromSheet();
+  const entry = map[key];
+  if (!entry) return null;
+  if (!entry.enabled) return { disabled: true };
+  return { url: entry.url };
+}
+
+// ================= Routes =================
 app.get("/", (req, res) => {
   res.type("html").send(`
     <h2>ARB YouTube Subscriber Verification</h2>
@@ -199,17 +245,13 @@ app.get("/", (req, res) => {
   `);
 });
 
+// start auth: /auth?key=psd_001&return=https://yourpost...
 function startGoogleAuth(req, res) {
-  const key = String(req.query.key || "default").trim();
-  const returnUrl = String(req.query.return || DEFAULT_RETURN_URL || "").trim();
+  const key = String(req.query.key || "").trim();
+  const returnUrl = String(req.query.return || "").trim();
 
-  if (!DOWNLOAD_MAP[key]) {
-    return res.status(400).send("Invalid download key.");
-  }
-
-  if (!isAllowedReturnUrl(returnUrl)) {
-    return res.status(400).send("Invalid return URL.");
-  }
+  if (!key) return res.status(400).send("Missing key.");
+  if (!isAllowedReturnUrl(returnUrl)) return res.status(400).send("Invalid return URL.");
 
   const client = oauthClient();
   const state = oauthStateToken({ key, returnUrl });
@@ -225,7 +267,6 @@ function startGoogleAuth(req, res) {
   return res.redirect(authUrl);
 }
 
-// Support both URLs
 app.get("/auth", startGoogleAuth);
 app.get("/auth/google", startGoogleAuth);
 
@@ -237,7 +278,7 @@ app.get("/oauth2/callback", async (req, res) => {
       return res.status(400).send(`
         <h2>Verification cancelled</h2>
         <p>You must allow YouTube access to verify your subscription.</p>
-        <p><a href="${CHANNEL_URL}" target="_blank" rel="noopener">Subscribe on YouTube</a></p>
+        <p><a href="${CHANNEL_URL}" target="_blank" rel="noopener">Subscribe to Anandan RB</a></p>
       `);
     }
 
@@ -247,6 +288,13 @@ app.get("/oauth2/callback", async (req, res) => {
     if (!statePayload) return res.status(400).send("Invalid or expired OAuth request.");
 
     const { key, returnUrl } = statePayload;
+
+    // (optional) check key exists in sheet before doing YouTube check
+    const entry = await getDownloadUrlByKey(key);
+    if (!entry || entry.disabled) {
+      clearGrantCookie(res);
+      return res.status(400).send("Invalid/disabled download key.");
+    }
 
     const client = oauthClient();
     const { tokens } = await client.getToken(String(code));
@@ -275,32 +323,43 @@ app.get("/oauth2/callback", async (req, res) => {
     return res.redirect(buildReturnRedirect(returnUrl, key));
   } catch (err) {
     console.error("OAuth verification error:", err?.response?.data || err);
-    return res
-      .status(500)
-      .send("Unable to verify the YouTube subscription right now. Please try again.");
+    return res.status(500).send("Unable to verify the YouTube subscription right now. Please try again.");
   }
 });
 
-app.get("/download", (req, res) => {
-  const payload = verifyPayload(req.cookies.arb_subscriber_grant);
-  if (!payload) {
-    return res.status(403).send(`
-      <h2>Subscriber verification required</h2>
-      <p>Please return to the download page and verify your YouTube subscription.</p>
-    `);
+app.get("/download", async (req, res) => {
+  try {
+    const payload = verifyPayload(req.cookies.arb_subscriber_grant);
+    if (!payload) {
+      return res.status(403).send(`
+        <h2>Subscriber verification required</h2>
+        <p>Please return to the download page and verify your YouTube subscription.</p>
+      `);
+    }
+
+    const key = String(req.query.key || "").trim();
+    if (!key) return res.status(400).send("Missing key.");
+
+    const entry = await getDownloadUrlByKey(key);
+    if (!entry) return res.status(404).send("Invalid key.");
+    if (entry.disabled) return res.status(403).send("This download is disabled.");
+
+    return res.redirect(302, entry.url);
+  } catch (err) {
+    console.error("Download error:", err?.response?.data || err);
+    return res.status(500).send("Download service unavailable. Please try again.");
   }
+});
 
-  const key = String(req.query.key || "default").trim();
-  const url = DOWNLOAD_MAP[key];
-
-  if (!url) return res.status(404).send("Invalid download key.");
-
-  return res.redirect(302, url);
+app.get("/api/status", (req, res) => {
+  const payload = verifyPayload(req.cookies.arb_subscriber_grant);
+  if (!payload) return res.status(401).json({ verified: false });
+  return res.json({ verified: true, expiresAt: payload.exp });
 });
 
 app.get("/logout", (req, res) => {
   clearGrantCookie(res);
-  return res.type("html").send("Logged out. You can close this tab.");
+  res.type("html").send("Logged out. You can close this tab.");
 });
 
 app.listen(PORT, () => {
