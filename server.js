@@ -16,8 +16,12 @@ const CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI;
 
-const TARGET_CHANNEL_ID = process.env.TARGET_CHANNEL_ID || "UCLH3kQlui92HWRSJbrRZ9-A";
-const CHANNEL_URL = process.env.CHANNEL_URL || "https://www.youtube.com/channel/UCLH3kQlui92HWRSJbrRZ9-A";
+const TARGET_CHANNEL_ID =
+  process.env.TARGET_CHANNEL_ID || "UCLH3kQlui92HWRSJbrRZ9-A";
+const CHANNEL_URL =
+  process.env.CHANNEL_URL ||
+  "https://www.youtube.com/channel/UCLH3kQlui92HWRSJbrRZ9-A";
+
 const BLOGGER_RETURN_URL = process.env.BLOGGER_RETURN_URL;
 const DOWNLOAD_URL = process.env.DOWNLOAD_URL;
 const SESSION_SECRET = process.env.SESSION_SECRET;
@@ -25,7 +29,14 @@ const SESSION_SECRET = process.env.SESSION_SECRET;
 const GRANT_SECONDS = Number(process.env.GRANT_SECONDS || 900); // 15 minutes
 const OAUTH_STATE_SECONDS = 600; // 10 minutes
 
-if (!CLIENT_ID || !CLIENT_SECRET || !REDIRECT_URI || !BLOGGER_RETURN_URL || !DOWNLOAD_URL || !SESSION_SECRET) {
+if (
+  !CLIENT_ID ||
+  !CLIENT_SECRET ||
+  !REDIRECT_URI ||
+  !BLOGGER_RETURN_URL ||
+  !DOWNLOAD_URL ||
+  !SESSION_SECRET
+) {
   console.error("Missing required environment variables. Check .env.example.");
   process.exit(1);
 }
@@ -40,16 +51,25 @@ function b64url(input) {
 
 function signPayload(payload) {
   const body = b64url(JSON.stringify(payload));
-  const sig = crypto.createHmac("sha256", SESSION_SECRET).update(body).digest("base64url");
+  const sig = crypto
+    .createHmac("sha256", SESSION_SECRET)
+    .update(body)
+    .digest("base64url");
   return `${body}.${sig}`;
 }
 
 function verifyPayload(token) {
   if (!token || !token.includes(".")) return null;
+
   const [body, sig] = token.split(".");
-  const expected = crypto.createHmac("sha256", SESSION_SECRET).update(body).digest("base64url");
-  const a = Buffer.from(sig);
-  const b = Buffer.from(expected);
+  const expected = crypto
+    .createHmac("sha256", SESSION_SECRET)
+    .update(body)
+    .digest("base64url");
+
+  // Compare decoded bytes (more correct than comparing utf8 strings)
+  const a = Buffer.from(sig, "base64url");
+  const b = Buffer.from(expected, "base64url");
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
 
   let payload;
@@ -64,8 +84,7 @@ function verifyPayload(token) {
 }
 
 function safeReturnUrl() {
-  // This project intentionally uses one fixed return URL from the environment.
-  // Do not accept arbitrary redirect URLs from visitors.
+  // Intentionally fixed return URL from env (prevents open-redirect attacks)
   return BLOGGER_RETURN_URL;
 }
 
@@ -73,7 +92,7 @@ function setGrantCookie(res) {
   const payload = {
     ok: true,
     iat: Date.now(),
-    exp: Date.now() + GRANT_SECONDS * 1000
+    exp: Date.now() + GRANT_SECONDS * 1000,
   };
 
   const token = signPayload(payload);
@@ -83,7 +102,7 @@ function setGrantCookie(res) {
     secure: true,
     sameSite: "none",
     maxAge: GRANT_SECONDS * 1000,
-    path: "/"
+    path: "/",
   });
 }
 
@@ -92,23 +111,22 @@ function clearGrantCookie(res) {
     httpOnly: true,
     secure: true,
     sameSite: "none",
-    path: "/"
+    path: "/",
   });
 }
 
-async function isSubscribed(accessToken) {
+// ✅ FIXED: accept the OAuth2 client (not an access-token string)
+async function isSubscribed(oauth2Client) {
   const youtube = google.youtube({
     version: "v3",
-    auth: client
+    auth: oauth2Client,
   });
 
-  // mine=true asks for the authenticated user's subscriptions.
-  // forChannelId narrows the result to ARB Photography's channel.
   const response = await youtube.subscriptions.list({
     part: "snippet",
     mine: true,
     forChannelId: TARGET_CHANNEL_ID,
-    maxResults: 1
+    maxResults: 1,
   });
 
   return Array.isArray(response.data.items) && response.data.items.length > 0;
@@ -117,7 +135,7 @@ async function isSubscribed(accessToken) {
 function oauthStateToken() {
   return signPayload({
     purpose: "youtube_oauth",
-    exp: Date.now() + OAUTH_STATE_SECONDS * 1000
+    exp: Date.now() + OAUTH_STATE_SECONDS * 1000,
   });
 }
 
@@ -134,7 +152,8 @@ app.get("/", (req, res) => {
   `);
 });
 
-app.get("/auth", (req, res) => {
+// Auth handler (so we can support both /auth and /auth/google)
+function startGoogleAuth(req, res) {
   const client = oauthClient();
   const state = oauthStateToken();
 
@@ -143,11 +162,17 @@ app.get("/auth", (req, res) => {
     include_granted_scopes: true,
     prompt: "consent",
     scope: ["https://www.googleapis.com/auth/youtube.readonly"],
-    state
+    state,
   });
 
-  res.redirect(authUrl);
-});
+  return res.redirect(authUrl);
+}
+
+// Keep your old URL working:
+app.get("/auth", startGoogleAuth);
+
+// Also support the URL you tried earlier:
+app.get("/auth/google", startGoogleAuth);
 
 app.get("/oauth2/callback", async (req, res) => {
   try {
@@ -169,6 +194,7 @@ app.get("/oauth2/callback", async (req, res) => {
     const { tokens } = await client.getToken(code);
     client.setCredentials(tokens);
 
+    // ✅ FIXED: pass the oauth client
     const subscribed = await isSubscribed(client);
 
     if (!subscribed) {
@@ -194,7 +220,11 @@ app.get("/oauth2/callback", async (req, res) => {
     return res.redirect(`${safeReturnUrl()}${separator}subscriber_verified=1`);
   } catch (err) {
     console.error("OAuth verification error:", err?.response?.data || err);
-    return res.status(500).send("Unable to verify the YouTube subscription right now. Please try again.");
+    return res
+      .status(500)
+      .send(
+        "Unable to verify the YouTube subscription right now. Please try again."
+      );
   }
 });
 
@@ -204,13 +234,13 @@ app.get("/api/status", (req, res) => {
   if (!payload) {
     return res.status(401).json({
       verified: false,
-      message: "Subscriber verification required."
+      message: "Subscriber verification required.",
     });
   }
 
   return res.json({
     verified: true,
-    expiresAt: payload.exp
+    expiresAt: payload.exp,
   });
 });
 
@@ -224,14 +254,13 @@ app.get("/download", (req, res) => {
     `);
   }
 
-  // The real Google Drive URL is kept on the server and is not placed
-  // in the Blogger source code.
-  res.redirect(302, DOWNLOAD_URL);
+  // Kept on the server; not exposed in Blogger source
+  return res.redirect(302, DOWNLOAD_URL);
 });
 
 app.get("/logout", (req, res) => {
   clearGrantCookie(res);
-  res.redirect(BLOGGER_RETURN_URL);
+  return res.redirect(BLOGGER_RETURN_URL);
 });
 
 app.listen(PORT, () => {
