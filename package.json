@@ -1,0 +1,19 @@
+{
+  "name": "arb-youtube-subscriber-download",
+  "version": "1.0.0",
+  "private": true,
+  "description": "YouTube subscriber verification gateway for ARB Photography Blogger downloads.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "cookie-parser": "^1.4.7",
+    "dotenv": "^16.6.1",
+    "express": "^5.1.0",
+    "googleapis": "^156.0.0"
+  }
+}

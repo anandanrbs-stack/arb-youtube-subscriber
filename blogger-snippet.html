@@ -1,0 +1,175 @@
+<!-- ARB Photo/PSD Download — YouTube Subscriber Verification -->
+<style>
+.arb-sub-box{
+  max-width:420px;
+  margin:30px auto;
+  padding:22px;
+  text-align:center;
+  font-family:Arial,sans-serif;
+  border:1px solid #ddd;
+  border-radius:10px;
+  background:#fff;
+  box-sizing:border-box;
+}
+.arb-sub-btn{
+  border:0;
+  border-radius:7px;
+  padding:13px 22px;
+  font-size:16px;
+  font-weight:700;
+  cursor:pointer;
+  color:#fff;
+  background:#e62117;
+}
+.arb-sub-btn:hover{background:#c91d15}
+.arb-sub-btn:disabled{opacity:.65;cursor:not-allowed}
+.arb-status{margin-top:12px;font-size:15px}
+.arb-countdown{
+  margin-top:14px;
+  font-size:18px;
+  font-weight:700;
+  color:#007bff;
+  display:none;
+}
+.arb-download{
+  display:none;
+  margin-top:14px;
+  text-decoration:none;
+  background:#28a745;
+  color:#fff;
+  padding:13px 22px;
+  border-radius:7px;
+  font-weight:700;
+}
+.arb-subscribe-link{
+  display:none;
+  margin-top:12px;
+  color:#e62117;
+  font-weight:700;
+}
+</style>
+
+<div class="arb-sub-box">
+  <button id="arbFastSubscriber" class="arb-sub-btn">
+    Fast Download for Subscriber
+  </button>
+
+  <div id="arbStatus" class="arb-status"></div>
+  <div id="arbCountdown" class="arb-countdown"></div>
+
+  <a id="arbDownload" class="arb-download"
+     href="https://YOUR-BACKEND-DOMAIN.example.com/download">
+     Download Now
+  </a>
+
+  <a id="arbSubscribeLink"
+     class="arb-subscribe-link"
+     href="https://www.youtube.com/channel/UCLH3kQlui92HWRSJbrRZ9-A"
+     target="_blank" rel="noopener">
+     Subscribe to Anandan RB
+  </a>
+</div>
+
+<script>
+(function(){
+  // Replace this with your deployed backend URL.
+  const BACKEND = "https://YOUR-BACKEND-DOMAIN.example.com";
+
+  const button = document.getElementById("arbFastSubscriber");
+  const status = document.getElementById("arbStatus");
+  const countdown = document.getElementById("arbCountdown");
+  const download = document.getElementById("arbDownload");
+  const subscribeLink = document.getElementById("arbSubscribeLink");
+
+  let timer = null;
+
+  function setStatus(message){
+    status.textContent = message || "";
+  }
+
+  async function checkVerified(){
+    try{
+      const response = await fetch(BACKEND + "/api/status", {
+        method: "GET",
+        credentials: "include",
+        cache: "no-store"
+      });
+
+      if(!response.ok) return false;
+
+      const data = await response.json();
+      return data.verified === true;
+    }catch(e){
+      console.error(e);
+      return false;
+    }
+  }
+
+  function start30SecondCountdown(){
+    if(timer) clearInterval(timer);
+
+    button.style.display = "none";
+    subscribeLink.style.display = "none";
+    download.style.display = "none";
+    countdown.style.display = "block";
+
+    let seconds = 30;
+    countdown.textContent = "Subscriber verified ✓ — Download will appear in " + seconds + " seconds";
+
+    timer = setInterval(function(){
+      seconds--;
+
+      if(seconds <= 0){
+        clearInterval(timer);
+        timer = null;
+        countdown.style.display = "none";
+        download.style.display = "inline-block";
+        setStatus("Verification successful. Your download is ready.");
+        return;
+      }
+
+      countdown.textContent = "Subscriber verified ✓ — Download will appear in " + seconds + " seconds";
+    }, 1000);
+  }
+
+  async function beginVerification(){
+    button.disabled = true;
+    setStatus("Checking subscriber verification...");
+    subscribeLink.style.display = "none";
+
+    const verified = await checkVerified();
+
+    if(verified){
+      button.disabled = false;
+      start30SecondCountdown();
+      return;
+    }
+
+    // Start the OAuth flow. Google will ask the visitor to authorize
+    // the application to read their YouTube subscriptions.
+    window.location.href = BACKEND + "/auth";
+  }
+
+  button.addEventListener("click", beginVerification);
+
+  // After OAuth returns, automatically verify again and start the
+  // countdown only when the backend has confirmed the subscription.
+  const params = new URLSearchParams(window.location.search);
+
+  if(params.get("subscriber_verified") === "1"){
+    window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
+
+    setStatus("Checking your YouTube subscription...");
+
+    checkVerified().then(function(verified){
+      if(verified){
+        start30SecondCountdown();
+      }else{
+        button.disabled = false;
+        setStatus("Subscriber verification could not be completed.");
+        subscribeLink.style.display = "inline-block";
+      }
+    });
+  }
+})();
+</script>
