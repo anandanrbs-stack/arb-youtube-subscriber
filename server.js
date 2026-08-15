@@ -99,7 +99,7 @@ function clearGrantCookie(res) {
 async function isSubscribed(accessToken) {
   const youtube = google.youtube({
     version: "v3",
-    auth: accessToken
+    auth: client
   });
 
   // mine=true asks for the authenticated user's subscriptions.
@@ -169,7 +169,7 @@ app.get("/oauth2/callback", async (req, res) => {
     const { tokens } = await client.getToken(code);
     client.setCredentials(tokens);
 
-    const subscribed = await isSubscribed(tokens.access_token);
+    const subscribed = await isSubscribed(client);
 
     if (!subscribed) {
       clearGrantCookie(res);
