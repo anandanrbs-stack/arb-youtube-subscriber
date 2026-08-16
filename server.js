@@ -46,7 +46,9 @@ const ALLOWED_RETURN_HOSTS = (process.env.ALLOWED_RETURN_HOSTS || "")
 const SHEET_CACHE_SECONDS = Number(process.env.SHEET_CACHE_SECONDS || 300); // 5 minutes
 
 if (!CLIENT_ID || !CLIENT_SECRET || !REDIRECT_URI || !SESSION_SECRET) {
-  console.error("Missing env: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI, SESSION_SECRET");
+  console.error(
+    "Missing env: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI, SESSION_SECRET"
+  );
   process.exit(1);
 }
 if (!TARGET_CHANNEL_ID) {
@@ -54,7 +56,9 @@ if (!TARGET_CHANNEL_ID) {
   process.exit(1);
 }
 if (!SHEET_ID || !SA_EMAIL || !SA_PRIVATE_KEY) {
-  console.error("Missing env for Sheets: GOOGLE_SHEETS_ID, GOOGLE_SERVICE_ACCOUNT_EMAIL, GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY");
+  console.error(
+    "Missing env for Sheets: GOOGLE_SHEETS_ID, GOOGLE_SERVICE_ACCOUNT_EMAIL, GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY"
+  );
   process.exit(1);
 }
 if (ALLOWED_RETURN_HOSTS.length === 0) {
@@ -76,7 +80,10 @@ function b64url(input) {
 
 function signPayload(payload) {
   const body = b64url(JSON.stringify(payload));
-  const sig = crypto.createHmac("sha256", SESSION_SECRET).update(body).digest("base64url");
+  const sig = crypto
+    .createHmac("sha256", SESSION_SECRET)
+    .update(body)
+    .digest("base64url");
   return `${body}.${sig}`;
 }
 
@@ -84,7 +91,10 @@ function verifyPayload(token) {
   if (!token || !token.includes(".")) return null;
 
   const [body, sig] = token.split(".");
-  const expected = crypto.createHmac("sha256", SESSION_SECRET).update(body).digest("base64url");
+  const expected = crypto
+    .createHmac("sha256", SESSION_SECRET)
+    .update(body)
+    .digest("base64url");
 
   const a = Buffer.from(sig, "base64url");
   const b = Buffer.from(expected, "base64url");
@@ -101,7 +111,11 @@ function verifyPayload(token) {
 }
 
 function setGrantCookie(res) {
-  const payload = { ok: true, iat: Date.now(), exp: Date.now() + GRANT_SECONDS * 1000 };
+  const payload = {
+    ok: true,
+    iat: Date.now(),
+    exp: Date.now() + GRANT_SECONDS * 1000,
+  };
   const token = signPayload(payload);
 
   res.cookie("arb_subscriber_grant", token, {
@@ -137,7 +151,9 @@ function isAllowedReturnUrl(urlString) {
   const host = u.hostname.toLowerCase();
 
   // allow exact host OR subdomain of allowed host
-  return ALLOWED_RETURN_HOSTS.some((allowed) => host === allowed || host.endsWith("." + allowed));
+  return ALLOWED_RETURN_HOSTS.some(
+    (allowed) => host === allowed || host.endsWith("." + allowed)
+  );
 }
 
 function buildReturnRedirect(returnUrl, key) {
@@ -159,6 +175,16 @@ async function isSubscribed(oauth2Client) {
   });
 
   return Array.isArray(response.data.items) && response.data.items.length > 0;
+}
+
+// Extract useful info from Google API errors
+function getGoogleApiErrorInfo(err) {
+  const data = err?.response?.data;
+  const e = data?.error;
+  const code = e?.code;
+  const message = e?.message;
+  const reason = e?.errors?.[0]?.reason;
+  return { code, message, reason, raw: data };
 }
 
 // ===== OAuth state token stores {key, returnUrl} securely =====
@@ -207,8 +233,6 @@ async function loadDownloadMapFromSheet() {
   const rows = resp.data.values || [];
   const map = {};
 
-  // If first row is headers, this will still work; it just creates a useless "key" entry unless you keep headers
-  // Better: keep header row and skip it if it matches "key"
   for (let i = 0; i < rows.length; i++) {
     const [keyRaw, titleRaw, urlRaw, enabledRaw] = rows[i];
 
@@ -289,7 +313,7 @@ app.get("/oauth2/callback", async (req, res) => {
 
     const { key, returnUrl } = statePayload;
 
-    // (optional) check key exists in sheet before doing YouTube check
+    // check key exists in sheet before doing YouTube check
     const entry = await getDownloadUrlByKey(key);
     if (!entry || entry.disabled) {
       clearGrantCookie(res);
@@ -300,7 +324,43 @@ app.get("/oauth2/callback", async (req, res) => {
     const { tokens } = await client.getToken(String(code));
     client.setCredentials(tokens);
 
-    const subscribed = await isSubscribed(client);
+    // ===== UPDATED: handle YouTube API 403 gracefully =====
+    let subscribed = false;
+    try {
+      subscribed = await isSubscribed(client);
+    } catch (e) {
+      const info = getGoogleApiErrorInfo(e);
+      console.error("YouTube subscription check error:", info.raw || e);
+
+      // If YouTube blocks subscription access for this account, show a friendly message
+      if (info.code === 403) {
+        clearGrantCookie(res);
+        return res.status(200).send(`
+          <!doctype html>
+          <html>
+          <head><meta name="viewport" content="width=device-width,initial-scale=1">
+          <title>Cannot verify subscription</title></head>
+          <body style="font-family:Arial,sans-serif;text-align:center;padding:40px">
+            <h2>Cannot access your subscriptions</h2>
+            <p>YouTube did not allow us to read subscriptions for this Google account.</p>
+            <p>Please try one of these:</p>
+            <ol style="text-align:left;display:inline-block">
+              <li>Use another Google account that has an active YouTube channel</li>
+              <li>Open YouTube → Settings → Privacy, and make subscriptions visible (if possible)</li>
+              <li>Then try again</li>
+            </ol>
+            <p><a href="${CHANNEL_URL}" target="_blank" rel="noopener">Open Anandan RB channel</a></p>
+            <p><a href="${returnUrl}" rel="noopener">Back to download page</a></p>
+            <hr/>
+            <small>Details: ${info.message || "403 Forbidden"}</small>
+          </body>
+          </html>
+        `);
+      }
+
+      // Other errors => treat as server error
+      throw e;
+    }
 
     if (!subscribed) {
       clearGrantCookie(res);
@@ -323,7 +383,9 @@ app.get("/oauth2/callback", async (req, res) => {
     return res.redirect(buildReturnRedirect(returnUrl, key));
   } catch (err) {
     console.error("OAuth verification error:", err?.response?.data || err);
-    return res.status(500).send("Unable to verify the YouTube subscription right now. Please try again.");
+    return res
+      .status(500)
+      .send("Unable to verify the YouTube subscription right now. Please try again.");
   }
 });
 
